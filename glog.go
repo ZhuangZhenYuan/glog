@@ -402,6 +402,8 @@ func init() {
 	flag.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr")
 	flag.Var(&logging.vmodule, "vmodule", "comma-separated list of pattern=N settings for file-filtered logging")
 	flag.Var(&logging.traceLocation, "log_backtrace_at", "when logging hits line file:N, emit a stack trace")
+	flag.StringVar(&logging.dirPartition, "dirpartition", "", "文件夹分割，分割等级（年，月，日，时）")
+	flag.StringVar(&logging.filePartition, "filepartition", "", "文件分割，分割等级（日，时，分）")
 
 	// Default stderrThreshold is ERROR.
 	logging.stderrThreshold = errorLog
@@ -453,6 +455,10 @@ type loggingT struct {
 	// safely using atomic.LoadInt32.
 	vmodule   moduleSpec // The state of the -vmodule flag.
 	verbosity Level      // V logging level, the value of the -v flag/
+
+	dirPartition  string // 文件夹分割，分割等级（年，月，日，时）
+	filePartition string // 文件分割，分割等级（日，时，分）
+
 }
 
 // buffer holds a byte Buffer for reuse. The zero value is ready for use.
@@ -694,13 +700,13 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 		switch s {
 		case fatalLog:
 			l.file[fatalLog].Write(data)
-			fallthrough
+			//fallthrough
 		case errorLog:
 			l.file[errorLog].Write(data)
-			fallthrough
+			//fallthrough
 		case warningLog:
 			l.file[warningLog].Write(data)
-			fallthrough
+			//fallthrough
 		case infoLog:
 			l.file[infoLog].Write(data)
 		}
@@ -722,11 +728,17 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 		// Write the stack trace for all goroutines to the files.
 		trace := stacks(true)
 		logExitFunc = func(error) {} // If we get a write error, we'll still exit below.
-		for log := fatalLog; log >= infoLog; log-- {
-			if f := l.file[log]; f != nil { // Can be nil if -logtostderr is set.
-				f.Write(trace)
-			}
+
+		// 单独写入Fatal文件就好，不需要往每个低级别的文件去进行写入
+		if f := l.file[s]; f != nil { // Can be nil if -logtostderr is set.
+			f.Write(trace)
 		}
+		//for log := fatalLog; log >= infoLog; log-- {
+		//	if f := l.file[log]; f != nil { // Can be nil if -logtostderr is set.
+		//		f.Write(trace)
+		//	}
+		//}
+
 		l.mu.Unlock()
 		timeoutFlush(10 * time.Second)
 		os.Exit(255) // C++ uses -1, which is silly because it's anded with 255 anyway.
@@ -817,6 +829,7 @@ func (sb *syncBuffer) Write(p []byte) (n int, err error) {
 			sb.logger.exit(err)
 		}
 	}
+
 	n, err = sb.Writer.Write(p)
 	sb.nbytes += uint64(n)
 	if err != nil {
@@ -832,7 +845,8 @@ func (sb *syncBuffer) rotateFile(now time.Time) error {
 		sb.file.Close()
 	}
 	var err error
-	sb.file, _, err = create(severityName[sb.sev], now)
+	var isNewCreate bool
+	sb.file, _, isNewCreate, err = create(severityName[sb.sev], now)
 	sb.nbytes = 0
 	if err != nil {
 		return err
@@ -841,13 +855,16 @@ func (sb *syncBuffer) rotateFile(now time.Time) error {
 	sb.Writer = bufio.NewWriterSize(sb.file, bufferSize)
 
 	// Write header.
-	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "Log file created at: %s\n", now.Format("2006/01/02 15:04:05"))
-	fmt.Fprintf(&buf, "Running on machine: %s\n", host)
-	fmt.Fprintf(&buf, "Binary: Built with %s %s for %s/%s\n", runtime.Compiler, runtime.Version(), runtime.GOOS, runtime.GOARCH)
-	fmt.Fprintf(&buf, "Log line format: [IWEF]mmdd hh:mm:ss.uuuuuu threadid file:line] msg\n")
-	n, err := sb.file.Write(buf.Bytes())
-	sb.nbytes += uint64(n)
+	if isNewCreate {
+		var buf bytes.Buffer
+		var n int
+		fmt.Fprintf(&buf, "Log file created at: %s\n", now.Format("2006/01/02 15:04:05"))
+		fmt.Fprintf(&buf, "Running on machine: %s\n", host)
+		fmt.Fprintf(&buf, "Binary: Built with %s %s for %s/%s\n", runtime.Compiler, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+		fmt.Fprintf(&buf, "Log line format: [IWEF]mmdd hh:mm:ss.uuuuuu threadid file:line] msg\n")
+		n, err = sb.file.Write(buf.Bytes())
+		sb.nbytes += uint64(n)
+	}
 	return err
 }
 
@@ -860,18 +877,31 @@ const bufferSize = 256 * 1024
 // l.mu is held.
 func (l *loggingT) createFiles(sev severity) error {
 	now := time.Now()
-	// Files are created in decreasing severity order, so as soon as we find one
-	// has already been created, we can stop.
-	for s := sev; s >= infoLog && l.file[s] == nil; s-- {
+
+	// 只创建要写入的文件
+	if l.file[sev] == nil {
 		sb := &syncBuffer{
 			logger: l,
-			sev:    s,
+			sev:    sev,
 		}
 		if err := sb.rotateFile(now); err != nil {
 			return err
 		}
-		l.file[s] = sb
+		l.file[sev] = sb
 	}
+
+	// Files are created in decreasing severity order, so as soon as we find one
+	// has already been created, we can stop.
+	//for s := sev; s >= infoLog && l.file[s] == nil; s-- {
+	//	sb := &syncBuffer{
+	//		logger: l,
+	//		sev:    s,
+	//	}
+	//	if err := sb.rotateFile(now); err != nil {
+	//		return err
+	//	}
+	//	l.file[s] = sb
+	//}
 	return nil
 }
 
@@ -1177,4 +1207,14 @@ func Exitln(args ...interface{}) {
 func Exitf(format string, args ...interface{}) {
 	atomic.StoreUint32(&fatalNoStacks, 1)
 	logging.printf(fatalLog, format, args...)
+}
+
+// TODO 待完善
+func BusinessLogf(format string, args ...interface{}) {
+	logging.printf(infoLog, format, args...)
+}
+
+// TODO 待完善
+func BusinessLog(args ...interface{}) {
+	logging.print(infoLog, args...)
 }

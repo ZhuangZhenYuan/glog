@@ -42,6 +42,11 @@ var logDir = flag.String("log_dir", "", "If non-empty, write log files in this d
 
 func createLogDirs() {
 	if *logDir != "" {
+		// 查看有没有进行文件夹分割
+		dirName := getDirName()
+		if dirName != "" {
+			*logDir = *logDir + dirName
+		}
 		logDirs = append(logDirs, *logDir)
 	}
 	logDirs = append(logDirs, os.TempDir())
@@ -81,6 +86,12 @@ func shortHostname(hostname string) string {
 // logName returns a new log file name containing tag, with start time t, and
 // the name for the symlink for tag.
 func logName(tag string, t time.Time) (name, link string) {
+
+	fileName := getFileName()
+	if fileName != "" {
+		return fmt.Sprintf("%s.%s.%s", program, fileName, tag), program + "." + tag
+	}
+
 	name = fmt.Sprintf("%s.%s.%s.log.%s.%04d%02d%02d-%02d%02d%02d.%d",
 		program,
 		host,
@@ -102,23 +113,69 @@ var onceLogDirs sync.Once
 // contains tag ("INFO", "FATAL", etc.) and t.  If the file is created
 // successfully, create also attempts to update the symlink for that tag, ignoring
 // errors.
-func create(tag string, t time.Time) (f *os.File, filename string, err error) {
+func create(tag string, t time.Time) (f *os.File, filename string, isNewCreate bool, err error) {
+
 	onceLogDirs.Do(createLogDirs)
 	if len(logDirs) == 0 {
-		return nil, "", errors.New("log: no log dirs")
+		return nil, "", false, errors.New("log: no log dirs")
 	}
 	name, link := logName(tag, t)
 	var lastErr error
 	for _, dir := range logDirs {
+		if !exists(dir) {
+			os.Mkdir(dir, os.ModePerm)
+		}
 		fname := filepath.Join(dir, name)
+		// 如果文件存在就不创建
+		openFile, openFileErr := os.OpenFile(fname, os.O_WRONLY|os.O_APPEND, 0666)
+		if openFileErr == nil {
+			return openFile, fname, false, nil
+		}
 		f, err := os.Create(fname)
 		if err == nil {
-			symlink := filepath.Join(dir, link)
-			os.Remove(symlink)        // ignore err
-			os.Symlink(name, symlink) // ignore err
-			return f, fname, nil
+			_ = link
+			//symlink := filepath.Join(dir, link)
+			//os.Remove(symlink)        // ignore err
+			//os.Symlink(name, symlink) // ignore err
+			return f, fname, true, nil
 		}
 		lastErr = err
 	}
-	return nil, "", fmt.Errorf("log: cannot create log: %v", lastErr)
+	return nil, "", false, fmt.Errorf("log: cannot create log: %v", lastErr)
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path) //os.Stat获取文件信息
+	if err != nil {
+		if os.IsExist(err) {
+			return true
+		}
+		return false
+	}
+	return true
+}
+
+func getDirName() string {
+	t := time.Now()
+	var name string
+	switch logging.dirPartition {
+	case "day":
+		name = fmt.Sprintf("%d.%d.%d.%d", t.Year(), t.Month(), t.Day(), t.Hour())
+	}
+	if name != "" {
+		if strings.Index("/", *logDir) == -1 {
+			return "/" + name
+		}
+	}
+	return name
+}
+
+func getFileName() string {
+	t := time.Now()
+	var name string
+	switch logging.filePartition {
+	case "hour":
+		name = fmt.Sprintf("%d", t.Hour())
+	}
+	return name
 }
