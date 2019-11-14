@@ -160,7 +160,7 @@ func getDirName() string {
 	var name string
 	switch logging.dirPartition {
 	case "day":
-		name = fmt.Sprintf("%d.%d.%d.%d", t.Year(), t.Month(), t.Day(), t.Hour())
+		name = fmt.Sprintf("%d.%d.%d", t.Year(), t.Month(), t.Day())
 	}
 	if name != "" {
 		if strings.Index("/", *logDir) == -1 {
